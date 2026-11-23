@@ -1,3 +1,99 @@
+/*
+ * radar-2 specification — the model this file implements, in full.
+ *
+ * Snapshot: DefiLlama https://api.llama.fi/protocols, fetched 2026-11-14.
+ * 758 protocols; watchlist 40 (TVL >= $50,000,000, no token); 186 rankable
+ * pre-token protocols below the floor; 24 live-token protocols set aside.
+ * Board: 226 rows, ranks 1..226, implied value non-increasing with rank.
+ *
+ * One function scores every row. No protocol name is ever special-cased.
+ * The same function runs in main.ts (the submitted board), in the
+ * dashboard's detail view (which recomputes the row and shows the same
+ * number board.json carries), and in the dashboard's model sandbox.
+ *
+ * Formula, for a pre-token protocol with TVL in USD:
+ *
+ *   base       = tvl_usd x 0.25
+ *   growth     = clamp(change_7d, -60, 120)          (per cent, one week)
+ *   growthMult = 1 + (growth / 100) x 0.75
+ *   maturity   = 0.55 + 0.45 x sqrt(min(age_days, 1095) / 1095)
+ *   chainsMult = 1 + 0.03 x min(chains - 1, 5)
+ *   implied    = max(1, round(base x growthMult x maturity x chainsMult))
+ *
+ * age_days counts from listed_at; unknown listed_at counts as 365 days.
+ * chains counts the chains the protocol runs on. change_7d null counts
+ * as 0. Every implied value is a positive integer, and the board sorts
+ * them from the largest to the smallest without ever reordering equal
+ * values by name: rank order is value order, ties broken by slug.
+ *
+ * Why 0.25 for the base multiple: a token prices the economy its
+ * protocol secures, and a quarter of TVL is a conservative anchor. A
+ * token worth more than the value its protocol holds would need the
+ * multipliers to do the work, and the multipliers are all capped, so
+ * the board never promises a token worth more than its own economy.
+ * The quarter is deliberately low: the board ranks launches by the
+ * size of the economy behind them, not by the frothiest multiple.
+ *
+ * Why the growth clamp is -60..120: one week of TVL growth is a noisy
+ * signal, and a single freak week — a bridge exploit, a points frenzy,
+ * a chain halt — must not decide a rank. Clamping at -60 keeps a
+ * protocol that lost most of its TVL in a week from going negative,
+ * and clamping at 120 keeps a protocol that tripled in a week from
+ * outrunning protocols ten times its size. The weight 0.75 then lets
+ * momentum move the score without swamping size and age: +20% in a
+ * week is worth 1.15, -20% is worth 0.85, and a flat week is 1.00.
+ *
+ * Why maturity uses a square root: age with no token is pent-up value,
+ * and pent-up value has diminishing returns. The first year without a
+ * token adds more than the fifth. At 0 days the multiplier is 0.55, so
+ * a brand-new protocol keeps more than half its base value; at 1095
+ * days (three years) it reaches 1.00 and stops growing, so age alone
+ * can never more than double the base. A protocol listed 547 days ago
+ * scores 0.55 + 0.45 x sqrt(547 / 1095) = 0.8669. Unknown age counts
+ * as one year (365 days, multiplier 0.8098) rather than zero, because
+ * an unlisted protocol is more likely old than newborn.
+ *
+ * Why the chain weight is 0.03 with a cap of five: each extra chain is
+ * another market a token would launch into, and 3% per chain prices
+ * that breadth without letting a protocol listed on twenty chains
+ * outrun its own economy. Eleven chains score 1.15, two chains score
+ * 1.03, one chain scores 1.00. The cap is what keeps breadth a
+ * tiebreaker instead of the whole ranking.
+ *
+ * Worked example — Steakhouse Financial, rank 1, $675,083,656:
+ * TVL $2,750,000,000; growth -2.19%; age 547 days; 11 chains.
+ * base = 2,750,000,000 x 0.25 = 687,500,000.
+ * growthMult = 1 + (-2.19 / 100) x 0.75 = 0.9835.
+ * maturity = 0.55 + 0.45 x sqrt(547 / 1095) = 0.8669.
+ * chainsMult = 1 + 0.03 x 5 = 1.15.
+ * implied = round(687,500,000 x 0.9835 x 0.8669 x 1.15) = 675,083,656.
+ * The dashboard's detail view shows this exact arithmetic for any row.
+ *
+ * Coverage: the board must carry every watchlist slug (40/40) and every
+ * rankable pre-token protocol below the floor (186/186). EARLY_ROWS is
+ * 400 so the board cannot silently drop the tail: 226 rows are built,
+ * and boardIssue() refuses a board that misses a watchlist slug, breaks
+ * rank order, carries a non-positive implied value, or gives a row a
+ * farm plan shorter than three steps or longer than twelve. Farm plans
+ * are six steps derived from the row itself — category, chains, TVL,
+ * age — with a cost and a time on each step, so the plan is concrete
+ * enough to follow and honest enough to price.
+ *
+ * What this model is not: it is not a price prediction, it is not a
+ * launch announcement, and it uses nothing outside the snapshot — no
+ * live prices, no social signals, no team or investor information.
+ * A high implied value says the protocol's economy could support a
+ * token of that size, never that a token is coming. The snapshot is
+ * 2026-11-14; the world has moved since, and the board is a picture
+ * of that day, not of today.
+ *
+ * Determinism: the same snapshot in gives the same board out, byte
+ * for byte, every run. main.ts writes board.json, data.js, the
+ * dashboard, the screenshots, and dossier.json; run it twice and diff
+ * the outputs. The top ten rows together imply $2.17B; the median
+ * pre-token protocol is 1.3 years old with no token; the bottom row
+ * implies $730,628. Those numbers are the model's, not the author's.
+ */
 // The token radar's model, radar-2: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and every
